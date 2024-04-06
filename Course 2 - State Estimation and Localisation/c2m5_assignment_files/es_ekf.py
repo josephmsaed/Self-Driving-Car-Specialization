@@ -14,7 +14,7 @@ from rotations import angle_normalize, rpy_jacobian_axis_angle, skew_symmetric, 
 # This is where you will load the data from the pickle files. For parts 1 and 2, you will use
 # p1_data.pkl. For Part 3, you will use pt3_data.pkl.
 ################################################################################################
-with open('data/pt1_data.pkl', 'rb') as file:
+with open('Course 2 - State Estimation and Localisation/c2m5_assignment_files/data/pt3_data.pkl', 'rb') as file:
     data = pickle.load(file)
 
 ################################################################################################
@@ -96,11 +96,27 @@ lidar.data = (C_li @ lidar.data.T).T + t_i_li
 # most important aspects of a filter is setting the estimated sensor variances correctly.
 # We set the values here.
 ################################################################################################
-var_imu_f = 0.10
-var_imu_w = 0.25
-var_gnss  = 0.01
-var_lidar = 1.00
+part = 1 # can be 1, 2, or 3
+if part == 1:
+    var_imu_f = 0.10
+    var_imu_w = 0.25
+    var_gnss  = 0.01
+    var_lidar = 1.00
+elif part == 2:
+    var_imu_f = 0.10
+    var_imu_w = 0.25
+    var_gnss  = 0.01
+    var_lidar = 0.01
+elif part == 3:
+    var_imu_f = 0.10
+    var_imu_w = 0.25
+    var_gnss  = 0.01
+    var_lidar = 0.01
+else:
+    raise ValueError("Part must be one of: 1, 2, or 3")
 
+R_gnss = np.diag([var_gnss]*3)
+R_lidar = np.diag([var_lidar]*3)
 ################################################################################################
 # We can also set up some constants that won't change for any iteration of our solver.
 ################################################################################################
@@ -129,24 +145,30 @@ gnss_i  = 0
 lidar_i = 0
 
 #### 4. Measurement Update #####################################################################
-
+# todo
 ################################################################################################
 # Since we'll need a measurement update for both the GNSS and the LIDAR data, let's make
 # a function for it.
 ################################################################################################
 def measurement_update(sensor_var, p_cov_check, y_k, p_check, v_check, q_check):
     # 3.1 Compute Kalman Gain
+    K_k = p_cov_check@h_jac.T@np.linalg.inv((h_jac@p_cov_check@h_jac.T + sensor_var))
 
     # 3.2 Compute error state
+    d_x = K_k@((y_k - p_check).reshape(3))
 
     # 3.3 Correct predicted state
+    p_hat = p_check + d_x[:3]
+    v_hat = v_check + d_x[3:6]
+    q_hat = Quaternion(axis_angle=angle_normalize(d_x[6:])).quat_mult_left(q_check)
 
     # 3.4 Compute corrected covariance
+    p_cov_hat = (np.identity(9) - K_k@h_jac)@p_cov_check
 
     return p_hat, v_hat, q_hat, p_cov_hat
 
 #### 5. Main Filter Loop #######################################################################
-
+# todo
 ################################################################################################
 # Now that everything is set up, we can start taking in the sensor data and creating estimates
 # for our state in a loop.
@@ -155,14 +177,52 @@ for k in range(1, imu_f.data.shape[0]):  # start at 1 b/c we have initial predic
     delta_t = imu_f.t[k] - imu_f.t[k - 1]
 
     # 1. Update state with IMU inputs
-
+    omg_dt = angle_normalize(imu_w.data[k-1]*delta_t)
+    q_km = Quaternion(*q_est[k-1])
+    
+    C_ns = q_km.to_mat()
+    # OMG = qw*np.identity(4) + np.array([[0, -qv.T], [qv, -skew_symmetric(qv)]])
+    p = p_est[k-1] + delta_t*v_est[k-1] + 0.5*delta_t**2*(C_ns@imu_f.data[k-1] + g)
+    v = v_est[k-1] + delta_t*(C_ns@imu_f.data[k-1] + g)
+    q = q_km.quat_mult_left(Quaternion(axis_angle=omg_dt))
+    
     # 1.1 Linearize the motion model and compute Jacobians
+    F_km = np.identity(9)
+    F_km[:3,3:6] = np.identity(3)*delta_t
+    F_km[3:6,6:] = -skew_symmetric(C_ns@(imu_f.data[k-1].reshape(3,1)))*delta_t
 
     # 2. Propagate uncertainty
+    Q_km = np.diag([var_imu_f,var_imu_f,var_imu_f,
+                                      var_imu_w,var_imu_w,var_imu_w])
+    P_k = F_km@p_cov[k-1]@F_km.T + l_jac@(delta_t**2*Q_km)@l_jac.T
 
     # 3. Check availability of GNSS and LIDAR measurements
+    # if (imu_f.t[k-1] in gnss.t):
+    #     y_k = gnss.data[np.where(gnss.t == imu_f.t[k-1])]
+    #     p, v, q, P_k = measurement_update(R_gnss, P_k, y_k, p, v, q)
+    #     gnss_i += 1
+
+    # if (imu_f.t[k-1] in lidar.t):
+    #     y_k = lidar.data[np.where(lidar.t == imu_f.t[k-1])]
+    #     p, v, q, P_k = measurement_update(R_lidar, P_k, y_k, p, v, q) 
+    #     lidar_i += 1   
+    if gnss_i < gnss.data.shape[0] and imu_f.t[k] >= gnss.t[gnss_i]:
+        y_k = gnss.data[gnss_i]
+        p, v, q, P_k = measurement_update(R_gnss, P_k, y_k, p, v, q)
+        gnss_i += 1
+    if lidar_i < lidar.data.shape[0] and imu_f.t[k] >= lidar.t[lidar_i]:
+        y_k = lidar.data[lidar_i]
+        p, v, q, P_k = measurement_update(R_lidar, P_k, y_k, p, v, q) 
+        lidar_i += 1
 
     # Update states (save)
+    p_est[k] = p
+    # print(p)
+    v_est[k] = v
+    q_est[k] = q
+    p_cov[k] = P_k
+
+print("loop finished")
 
 #### 6. Results and Analysis ###################################################################
 
@@ -242,13 +302,13 @@ plt.show()
 ################################################################################################
 
 # Pt. 1 submission
-p1_indices = [9000, 9400, 9800, 10200, 10600]
-p1_str = ''
-for val in p1_indices:
-    for i in range(3):
-        p1_str += '%.3f ' % (p_est[val, i])
-with open('pt1_submission.txt', 'w') as file:
-    file.write(p1_str)
+# p1_indices = [9000, 9400, 9800, 10200, 10600]
+# p1_str = ''
+# for val in p1_indices:
+#     for i in range(3):
+#         p1_str += '%.3f ' % (p_est[val, i])
+# with open('Course 2 - State Estimation and Localisation/c2m5_assignment_files/pt1_submission.txt', 'w') as file:
+#     file.write(p1_str)
 
 # Pt. 2 submission
 # p2_indices = [9000, 9400, 9800, 10200, 10600]
@@ -256,14 +316,14 @@ with open('pt1_submission.txt', 'w') as file:
 # for val in p2_indices:
 #     for i in range(3):
 #         p2_str += '%.3f ' % (p_est[val, i])
-# with open('pt2_submission.txt', 'w') as file:
+# with open('Course 2 - State Estimation and Localisation/c2m5_assignment_files/pt2_submission.txt', 'w') as file:
 #     file.write(p2_str)
 
 # Pt. 3 submission
-# p3_indices = [6800, 7600, 8400, 9200, 10000]
-# p3_str = ''
-# for val in p3_indices:
-#     for i in range(3):
-#         p3_str += '%.3f ' % (p_est[val, i])
-# with open('pt3_submission.txt', 'w') as file:
-#     file.write(p3_str)
+p3_indices = [6800, 7600, 8400, 9200, 10000]
+p3_str = ''
+for val in p3_indices:
+    for i in range(3):
+        p3_str += '%.3f ' % (p_est[val, i])
+with open('Course 2 - State Estimation and Localisation/c2m5_assignment_files/pt3_submission.txt', 'w') as file:
+    file.write(p3_str)
